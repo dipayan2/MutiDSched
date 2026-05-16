@@ -38,13 +38,15 @@ class Job:
         self.status= TaskStatus.COMPLETE
 
 class Application:
-    def __init__(self, deadline, start_time=0):
+    def __init__(self, deadline, arrival_time=0):
         # deadline: user-provided value
         # start_time: defaults to 0 if not provided
         self.deadline = deadline
-        self.start_time = start_time
-        
+        self.arrival_time = arrival_time
+        self.app_status = TaskStatus.NOT_ACTIVE
         # Internal list to store our Job objects
+        self.active_job = -1
+        self.next_job = 0
         self.jobs = []
 
     def add_job(self, job):
@@ -57,30 +59,33 @@ class Application:
             
         self.jobs.append(job)
         return self
-
+    
     def __repr__(self):
         return (f"Application(StartTime={self.start_time}, "
                 f"Deadline={self.deadline}, Jobs={len(self.jobs)})")
 
 # --- Example Usage ---
 
-# 1. Using the default start_time (0)
-app1 = Application(deadline=100)
-print(app1) # Output: Application(StartTime=0, Deadline=100, Jobs=0)
+# # 1. Using the default start_time (0)
+# app1 = Application(deadline=100)
+# print(app1) # Output: Application(StartTime=0, Deadline=100, Jobs=0)
 
-# 2. Providing a custom start_time via user input
-user_val = int(input("Enter start time: ")) # e.g., 50
-app2 = Application(deadline=200, start_time=user_val)
-print(app2) # Output: Application(StartTime=50, Deadline=200, Jobs=0)
+# # 2. Providing a custom start_time via user input
+# user_val = int(input("Enter start time: ")) # e.g., 50
+# app2 = Application(deadline=200, start_time=user_val)
+# print(app2) # Output: Application(StartTime=50, Deadline=200, Jobs=0)
 
-# Example: Creating a chain of 3 jobs
-job1 = Job(0.1, 0.1, 0.2, 10)
-job2 = Job(0.5, 0.4, 0.5, 20, previous_job=job1)
-job3 = Job(0.9, 0.8, 0.9, 30, previous_job=job2)
+# # Example: Creating a chain of 3 jobs
+# job1 = Job(0.1, 0.1, 0.2, 10)
+# job2 = Job(0.5, 0.4, 0.5, 20, previous_job=job1)
+# job3 = Job(0.9, 0.8, 0.9, 30, previous_job=job2)
 
-# Manually linking forward
-job1.next_job = job2
-job2.next_job = job3
+# # Manually linking forward
+# job1.next_job = job2
+# job2.next_job = job3
+
+
+def scheduleer(applications):
 
 
 
