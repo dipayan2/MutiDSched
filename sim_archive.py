@@ -1,4 +1,3 @@
-import warnings
 from enum import Enum
 
 
@@ -29,7 +28,7 @@ class Job:
             f"Job(CPU={self.cpu}, GPU={self.gpu}, Mem={self.mem}, "
             f"Time={self.time}s, Prev={p}, Next={n}, Status={self.status})"
         )
-
+    
     def schedule(self, stime):
         """
         Marks the job as ACTIVE at stime.
@@ -42,6 +41,12 @@ class Job:
             )
         self.status = TaskStatus.ACTIVE
         self.start_time = stime
+
+    # def schedule(self, stime):
+    #     if self.previous_job and self.previous_job.status != TaskStatus.COMPLETE:
+    #         raise Exception("Cannot schedule job: predecessor not complete")
+    #     self.status = TaskStatus.ACTIVE
+    #     self.start_time = stime
 
     def complete(self, etime):
         if self.status != TaskStatus.ACTIVE:
@@ -69,28 +74,11 @@ class Application:
         self.deadline = deadline
         self.arrival_time = arrival_time
         self.app_status = TaskStatus.NOT_ACTIVE
-        self.active_job_index = 0  # cursor to next unscheduled job
+        self.active_job_index = -1  # -1 = none active
         self.jobs = []
 
     def add_job(self, job):
-        """
-        Adds a Job and maintains the doubly-linked chain.
-        Warns and stretches deadline if total job time exceeds available window.
-        Supports method chaining.
-        """
-        projected_total = self.total_time() + job.time
-        available_window = self.deadline - self.arrival_time
-
-        if projected_total > available_window:
-            new_deadline = self.arrival_time + projected_total
-            warnings.warn(
-                f"Total job time ({projected_total}) exceeds available window "
-                f"({available_window}). Updating deadline: "
-                f"{self.deadline} → {new_deadline}",
-                stacklevel=2
-            )
-            self.deadline = new_deadline
-
+        """Adds a Job and maintains the doubly-linked chain. Supports method chaining."""
         if self.jobs:
             prev_job = self.jobs[-1]
             prev_job.next_job = job
@@ -102,30 +90,30 @@ class Application:
         """
         Returns (job, earliest_start_time) for the next job ready to be scheduled,
         or None if the chain is blocked or all jobs are done.
-        Uses active_job_index as an O(1) cursor — no looping.
         """
-        if self.active_job_index >= len(self.jobs):
+        for job in self.jobs:
+            if job.status != TaskStatus.NOT_ACTIVE:
+                continue
+
+            if job.previous_job is None:
+                # First job: can start any time after application arrival
+                return (job, self.arrival_time)
+
+            if job.previous_job.status == TaskStatus.COMPLETE:
+                # Predecessor done: earliest start is when it ended
+                return (job, job.previous_job.end_time)
+
+            # Predecessor not done: chain is blocked, no point scanning further
             return None
 
-        job = self.jobs[self.active_job_index]
-
-        # First job in chain: can start any time after application arrival
-        if job.previous_job is None:
-            return (job, self.arrival_time)
-
-        # Predecessor done: earliest start is when it ended
-        if job.previous_job.status == TaskStatus.COMPLETE:
-            return (job, job.previous_job.end_time)
-
-        # Predecessor not done: chain is blocked
-        return None
+        return None  # all jobs complete or no jobs
 
     def get_running_jobs(self):
-        """Returns a list of currently ACTIVE jobs. Empty list if nothing running."""
+
         return [job for job in self.jobs if job.status == TaskStatus.ACTIVE]
 
     def total_time(self):
-        """Sum of all job durations."""
+
         return sum(j.time for j in self.jobs)
 
     def __repr__(self):
@@ -153,38 +141,18 @@ class SimulationResult:
 
     def summary(self):
         print(f"\n=== Simulation Complete at t={self.total_time} ===")
-        print(f"\n  Completed ({len(self.completed)}):")
+        print(f"  Completed ({len(self.completed)}):")
         for app in self.completed:
             print(f"    {app}")
-            for i, job in enumerate(app.jobs):
-                print(
-                    f"      Job {i}: start={job.start_time}, end={job.end_time} "
-                    f"| Job(cpu={job.cpu}, gpu={job.gpu}, mem={job.mem}, time={job.time})"
-                )
-        print(f"\n  Missed deadline ({len(self.missed)}):")
+        print(f"  Missed deadline ({len(self.missed)}):")
         for app in self.missed:
             print(f"    {app}")
-            for i, job in enumerate(app.jobs):
-                if job.status == TaskStatus.COMPLETE:
-                    timing = f"start={job.start_time}, end={job.end_time}"
-                else:
-                    timing = "never scheduled, evicted"
-                print(
-                    f"      Job {i} [{job.status.name}]: {timing} "
-                    f"| Job(cpu={job.cpu}, gpu={job.gpu}, mem={job.mem}, time={job.time})"
-                )
 
 
 class Scheduler:
-    def __init__(self, applications, allow_flex_deadline=False):
+    def __init__(self, applications):
         self.applications = applications
         self.clock = 0
-        self.missed_apps = []
-        self.allow_flex_deadline = allow_flex_deadline
-        # Snapshot original deadlines before any flex adjustments
-        self._original_deadlines = {
-            id(app): app.deadline for app in applications
-        }
 
     def _get_active_resource_usage(self):
         """Sum of cpu, gpu, mem across all currently running jobs in all applications."""
@@ -197,7 +165,6 @@ class Scheduler:
         return total_cpu, total_gpu, total_mem
 
     def _has_resource_capacity(self, job):
-        """Returns True if adding this job would not push any resource over 1.0."""
         total_cpu, total_gpu, total_mem = self._get_active_resource_usage()
         return (
             total_cpu + job.cpu <= 1.0 and
@@ -206,48 +173,13 @@ class Scheduler:
         )
 
     def _get_ready_applications(self):
-        """
-        Applications that have arrived and are not yet complete,
-        sorted by earliest deadline first (EDF).
-        """
-        return sorted(
-            [
-                app for app in self.applications
-                if app.arrival_time <= self.clock
-                and app.app_status != TaskStatus.COMPLETE
-            ],
-            key=lambda app: app.deadline
-        )
-
-    def _mark_missed_applications(self):
-        """
-        Force-close applications that have blown their deadline so the
-        simulation doesn't spin waiting for them, and they free resources.
-        Uses original deadline if allow_flex_deadline=False.
-        """
-        for app in self.applications:
-            if app.app_status == TaskStatus.COMPLETE:
-                continue
-            if app in self.missed_apps:
-                continue
-
-            deadline = (
-                app.deadline if self.allow_flex_deadline
-                else self._original_deadlines[id(app)]
-            )
-
-            if self.clock > deadline:
-                app.app_status = TaskStatus.COMPLETE
-                self.missed_apps.append(app)
+        return [
+            app for app in self.applications
+            if app.arrival_time <= self.clock
+            and app.app_status != TaskStatus.COMPLETE
+        ]
 
     def _try_schedule(self, app):
-        """
-        Schedule the next job in an application if:
-          - a schedulable job exists
-          - the clock has reached its earliest start time
-          - there is enough cpu, gpu, and mem capacity across all active jobs
-        Advances active_job_index on successful schedule.
-        """
         result = app.get_schedulable_job()
         if result is None:
             return
@@ -256,40 +188,36 @@ class Scheduler:
         if self.clock >= earliest and self._has_resource_capacity(job):
             job.schedule(self.clock)
             app.app_status = TaskStatus.ACTIVE
-            app.active_job_index += 1  # advance cursor to next job
 
     def _try_complete_app(self, app):
         """Mark application complete if all its jobs are done."""
         if all(j.status == TaskStatus.COMPLETE for j in app.jobs):
             app.app_status = TaskStatus.COMPLETE
 
-    def tick(self):
-        """
-        Advance simulation by one time unit.
-        Order per tick:
-          1. Evict deadline-blown apps first so they free resources.
-          2. Tick running jobs — auto-completes them if time elapsed.
-          3. Try to schedule the next unblocked job.
-          4. Check if the whole application is now done.
-        """
-        self.clock += 1
-        self._mark_missed_applications()
+    def _check_deadlines(self):
+        """Return applications that missed their deadline."""
+        return [
+            app for app in self.applications
+            if app.app_status != TaskStatus.COMPLETE
+            and self.clock > app.deadline
+        ]
 
-        for app in self._get_ready_applications():
+    def tick(self):
+        self.clock += 1
+        ready_apps = self._get_ready_applications()
+
+        for app in ready_apps:
+            # 1. Tick running jobs — auto-completes them if time elapsed
             for job in app.get_running_jobs():
                 job.tick(self.clock)
+
+            # 2. Try to schedule the next job in the chain
             self._try_schedule(app)
+
+            # 3. Check if the whole application is now done
             self._try_complete_app(app)
 
     def run(self, until=None):
-        """
-        Run the simulation until all applications are done or `until` is reached.
-
-        Args:
-            until: optional hard stop time; runs to natural completion if None
-        Returns:
-            SimulationResult with completed and missed applications
-        """
         while True:
             all_done = all(
                 app.app_status == TaskStatus.COMPLETE
@@ -299,40 +227,37 @@ class Scheduler:
                 break
             if until is not None and self.clock >= until:
                 break
+
             self.tick()
 
-        # Exclude missed apps from completed list
+        missed = self._check_deadlines()
         completed = [
             app for app in self.applications
             if app.app_status == TaskStatus.COMPLETE
-            and app not in self.missed_apps
         ]
-        return SimulationResult(completed, self.missed_apps, self.clock)
+        return SimulationResult(completed, missed, self.clock)
 
 
 # --- Example Usage ---
 if __name__ == "__main__":
     # app1: two jobs, fits comfortably within deadline
-    app1 = Application(deadline=100, arrival_time=0)
-    (app1
-        .add_job(Job(0.2, 0.1, 0.3, 10))
-        .add_job(Job(0.3, 0.2, 0.3, 20)))
+    app1 = Application(deadline=50, arrival_time=0)
+    app1.add_job(Job(0.2, 0.1, 0.3, 10))
+    app1.add_job(Job(0.3, 0.2, 0.3, 20))
 
-    # app2: deadline impossible — will warn, stretch deadline, then miss original
-    app2 = Application(deadline=100, arrival_time=0)
+    # app2: tight deadline — will miss
+    app2 = Application(deadline=15, arrival_time=0)
     app2.add_job(Job(0.9, 0.8, 0.9, 30))
 
     # app3: arrives late, low resource footprint
     app3 = Application(deadline=100, arrival_time=20)
-    (app3
-        .add_job(Job(0.3, 0.2, 0.2, 10))
-        .add_job(Job(0.1, 0.1, 0.1, 5)))
+    app3.add_job(Job(0.3, 0.2, 0.2, 10))
+    app3.add_job(Job(0.1, 0.1, 0.1, 5))
 
-    # app4: high resource job — blocked until app2 frees resources
-    app4 = Application(deadline=100, arrival_time=0)
+    # app4: high resource job — will be blocked until app2's job frees resources
+    app4 = Application(deadline=80, arrival_time=0)
     app4.add_job(Job(0.5, 0.5, 0.4, 15))
 
-    # allow_flex_deadline=False: app2 judged against original deadline=15
-    sim = Scheduler([app1, app2, app3, app4], allow_flex_deadline=False)
+    sim = Scheduler([app1, app2, app3, app4])
     result = sim.run()
     result.summary()
