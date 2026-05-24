@@ -6,6 +6,7 @@ class TaskStatus(Enum):
     NOT_ACTIVE = 0
     ACTIVE = 1
     COMPLETE = 2
+    EVICTED = 3
 
 
 class Job:
@@ -51,6 +52,15 @@ class Job:
         self.status = TaskStatus.COMPLETE
         self.end_time = self.start_time + self.time
         return self.end_time
+
+    def evict(self, etime):
+        """
+        Force-terminates a job due to deadline miss.
+        Can evict from any state — job may not have even started.
+        end_time is set to eviction time if job was running, -1 if never started.
+        """
+        self.status = TaskStatus.EVICTED
+        self.end_time = etime if self.start_time != -1 else -1
 
     def is_complete_at(self, current_time):
         return (
@@ -121,7 +131,8 @@ class Application:
         return None
 
     def get_running_jobs(self):
-        """Returns a list of currently ACTIVE jobs. Empty list if nothing running."""
+        """Returns a list of currently ACTIVE jobs. Empty list if nothing running.
+        EVICTED jobs are excluded — they no longer consume resources."""
         return [job for job in self.jobs if job.status == TaskStatus.ACTIVE]
 
     def total_time(self):
@@ -167,6 +178,8 @@ class SimulationResult:
             for i, job in enumerate(app.jobs):
                 if job.status == TaskStatus.COMPLETE:
                     timing = f"start={job.start_time}, end={job.end_time}"
+                elif job.status == TaskStatus.EVICTED and job.start_time != -1:
+                    timing = f"start={job.start_time}, evicted={job.end_time}"
                 else:
                     timing = "never scheduled, evicted"
                 print(
@@ -215,6 +228,7 @@ class Scheduler:
                 app for app in self.applications
                 if app.arrival_time <= self.clock
                 and app.app_status != TaskStatus.COMPLETE
+                and app.app_status != TaskStatus.EVICTED
             ],
             key=lambda app: app.deadline
         )
@@ -223,10 +237,11 @@ class Scheduler:
         """
         Force-close applications that have blown their deadline so the
         simulation doesn't spin waiting for them, and they free resources.
+        Evicts all non-complete jobs so resources are released immediately.
         Uses original deadline if allow_flex_deadline=False.
         """
         for app in self.applications:
-            if app.app_status == TaskStatus.COMPLETE:
+            if app.app_status in (TaskStatus.COMPLETE, TaskStatus.EVICTED):
                 continue
             if app in self.missed_apps:
                 continue
@@ -237,7 +252,11 @@ class Scheduler:
             )
 
             if self.clock > deadline:
-                app.app_status = TaskStatus.COMPLETE
+                # Evict all jobs that haven't completed — releases their resources
+                for job in app.jobs:
+                    if job.status != TaskStatus.COMPLETE:
+                        job.evict(self.clock)
+                app.app_status = TaskStatus.EVICTED
                 self.missed_apps.append(app)
 
     def _try_schedule(self, app):
@@ -259,7 +278,7 @@ class Scheduler:
             app.active_job_index += 1  # advance cursor to next job
 
     def _try_complete_app(self, app):
-        """Mark application complete if all its jobs are done."""
+        """Mark application complete only if all jobs are COMPLETE (not EVICTED)."""
         if all(j.status == TaskStatus.COMPLETE for j in app.jobs):
             app.app_status = TaskStatus.COMPLETE
 
@@ -292,7 +311,7 @@ class Scheduler:
         """
         while True:
             all_done = all(
-                app.app_status == TaskStatus.COMPLETE
+                app.app_status in (TaskStatus.COMPLETE, TaskStatus.EVICTED)
                 for app in self.applications
             )
             if all_done:
@@ -301,38 +320,44 @@ class Scheduler:
                 break
             self.tick()
 
-        # Exclude missed apps from completed list
         completed = [
             app for app in self.applications
             if app.app_status == TaskStatus.COMPLETE
-            and app not in self.missed_apps
         ]
         return SimulationResult(completed, self.missed_apps, self.clock)
 
 
-# --- Example Usage ---
 if __name__ == "__main__":
-    # app1: two jobs, fits comfortably within deadline
-    app1 = Application(deadline=100, arrival_time=0)
+    # app1: two jobs, moderate resources, comfortable deadline
+    app1 = Application(deadline=80, arrival_time=0)
     (app1
         .add_job(Job(0.2, 0.1, 0.3, 10))
         .add_job(Job(0.3, 0.2, 0.3, 20)))
 
-    # app2: deadline impossible — will warn, stretch deadline, then miss original
-    app2 = Application(deadline=100, arrival_time=0)
+    # app2: hogs nearly all resources for 30 ticks
+    app2 = Application(deadline=80, arrival_time=0)
     app2.add_job(Job(0.9, 0.8, 0.9, 30))
 
-    # app3: arrives late, low resource footprint
-    app3 = Application(deadline=100, arrival_time=20)
+    # app3: arrives late, light footprint
+    app3 = Application(deadline=80, arrival_time=20)
     (app3
         .add_job(Job(0.3, 0.2, 0.2, 10))
         .add_job(Job(0.1, 0.1, 0.1, 5)))
 
-    # app4: high resource job — blocked until app2 frees resources
-    app4 = Application(deadline=100, arrival_time=0)
+    # app4: blocked by app2, fits after it finishes
+    app4 = Application(deadline=80, arrival_time=0)
     app4.add_job(Job(0.5, 0.5, 0.4, 15))
 
-    # allow_flex_deadline=False: app2 judged against original deadline=15
-    sim = Scheduler([app1, app2, app3, app4], allow_flex_deadline=False)
+    # app5: job0 schedules immediately (tiny footprint)
+    #        job1 needs cpu=0.8 — after job0 finishes at t=11,
+    #        app2 (cpu=0.9) is still running until t=31,
+    #        then app1/app3/app4 pile on — cpu never drops low enough
+    #        deadline=45 expires before job1 ever gets a slot → EVICTED
+    app5 = Application(deadline=100, arrival_time=0)
+    (app5
+        .add_job(Job(0.1, 0.1, 0.1, 10))   # job0: runs fine at t=1
+        .add_job(Job(0.8, 0.7, 0.6, 20)))   # job1: never fits before t=45
+
+    sim = Scheduler([app1, app2, app3, app4, app5], allow_flex_deadline=False)
     result = sim.run()
     result.summary()
