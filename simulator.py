@@ -149,10 +149,14 @@ class Application:
 
 
 class SimulationResult:
-    def __init__(self, completed, missed, total_time):
+    def __init__(self, completed, missed, total_time,
+                 cpu_history, gpu_history, mem_history):
         self.completed = completed
         self.missed = missed
         self.total_time = total_time
+        self.cpu_history = cpu_history
+        self.gpu_history = gpu_history
+        self.mem_history = mem_history
 
     def __repr__(self):
         return (
@@ -161,6 +165,29 @@ class SimulationResult:
             f"Missed={len(self.missed)}, "
             f"TotalTime={self.total_time})"
         )
+
+    def stats(self):
+        n = len(self.cpu_history)
+        if n == 0:
+            print("No ticks recorded.")
+            return
+
+        def _fmt(history):
+            avg = sum(history) / n
+            peak = max(history)
+            idle = sum(1 for v in history if v == 0.0)
+            return avg, peak, idle
+
+        cpu_avg,  cpu_peak,  cpu_idle  = _fmt(self.cpu_history)
+        gpu_avg,  gpu_peak,  gpu_idle  = _fmt(self.gpu_history)
+        mem_avg,  mem_peak,  mem_idle  = _fmt(self.mem_history)
+
+        print(f"\n=== Resource Stats over {n} ticks ===")
+        print(f"  {'Resource':<10} {'Avg Usage':>10} {'Peak Usage':>12} {'Idle Ticks':>12}")
+        print(f"  {'-'*46}")
+        print(f"  {'CPU':<10} {cpu_avg:>9.1%} {cpu_peak:>11.1%} {cpu_idle:>10}t")
+        print(f"  {'GPU':<10} {gpu_avg:>9.1%} {gpu_peak:>11.1%} {gpu_idle:>10}t")
+        print(f"  {'MEM':<10} {mem_avg:>9.1%} {mem_peak:>11.1%} {mem_idle:>10}t")
 
     def summary(self):
         print(f"\n=== Simulation Complete at t={self.total_time} ===")
@@ -190,14 +217,18 @@ class SimulationResult:
 
 class Scheduler:
     def __init__(self, applications, allow_flex_deadline=False):
-        self.applications = applications
-        self.clock = 0
-        self.missed_apps = []
-        self.allow_flex_deadline = allow_flex_deadline
-        # Snapshot original deadlines before any flex adjustments
-        self._original_deadlines = {
-            id(app): app.deadline for app in applications
-        }
+            self.applications = applications
+            self.clock = 0
+            self.missed_apps = []
+            self.allow_flex_deadline = allow_flex_deadline
+            self._original_deadlines = {
+                id(app): app.deadline for app in applications
+            }
+            # Resource usage history: one entry per tick
+            self._cpu_history = []
+            self._gpu_history = []
+            self._mem_history = []
+
 
     def _get_active_resource_usage(self):
         """Sum of cpu, gpu, mem across all currently running jobs in all applications."""
@@ -283,14 +314,6 @@ class Scheduler:
             app.app_status = TaskStatus.COMPLETE
 
     def tick(self):
-        """
-        Advance simulation by one time unit.
-        Order per tick:
-          1. Evict deadline-blown apps first so they free resources.
-          2. Tick running jobs — auto-completes them if time elapsed.
-          3. Try to schedule the next unblocked job.
-          4. Check if the whole application is now done.
-        """
         self.clock += 1
         self._mark_missed_applications()
 
@@ -300,15 +323,13 @@ class Scheduler:
             self._try_schedule(app)
             self._try_complete_app(app)
 
-    def run(self, until=None):
-        """
-        Run the simulation until all applications are done or `until` is reached.
+        # Snapshot resource usage after all scheduling decisions this tick
+        cpu, gpu, mem = self._get_active_resource_usage()
+        self._cpu_history.append(cpu)
+        self._gpu_history.append(gpu)
+        self._mem_history.append(mem)
 
-        Args:
-            until: optional hard stop time; runs to natural completion if None
-        Returns:
-            SimulationResult with completed and missed applications
-        """
+    def run(self, until=None):
         while True:
             all_done = all(
                 app.app_status in (TaskStatus.COMPLETE, TaskStatus.EVICTED)
@@ -324,7 +345,10 @@ class Scheduler:
             app for app in self.applications
             if app.app_status == TaskStatus.COMPLETE
         ]
-        return SimulationResult(completed, self.missed_apps, self.clock)
+        return SimulationResult(
+            completed, self.missed_apps, self.clock,
+            self._cpu_history, self._gpu_history, self._mem_history
+        )
 
 
 if __name__ == "__main__":
@@ -361,3 +385,4 @@ if __name__ == "__main__":
     sim = Scheduler([app1, app2, app3, app4, app5], allow_flex_deadline=False)
     result = sim.run()
     result.summary()
+    result.stats()
